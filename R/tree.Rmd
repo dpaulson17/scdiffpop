@@ -164,7 +164,7 @@ lymp.deg.pre = lee.curr.pre %>%
     mydeg()
 
 ```
-git add <tree.Rmd>
+
 
 
 
