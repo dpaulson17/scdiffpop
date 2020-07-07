@@ -12,6 +12,9 @@ library(EnhancedVolcano)
 library(tidyverse)
 ```
 ```{r}
+
+## Hello! This is just a test to see if I can show changes on Git. 
+## hi hi hi
 #' Title
 #'
 #' @param sco 
@@ -161,3 +164,9 @@ lymp.deg.pre = lee.curr.pre %>%
     mydeg()
 
 ```
+git add <tree.Rmd>
+
+
+
+
+
