@@ -1,166 +1,257 @@
-## Tree differential expression analysis
-```{r}
-library(data.table)
-library(magrittr)
-library(ggplot2)
+# Tree differential expression analysis
+
+## Load Packages
+
+```{r message = FALSE}
+install.packages("DiagrammeR")
+```
+
+```{r message = FALSE}
+install.packages("rare")
+```
+
+```{r message = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("SingleR")
+```
+
+```{r message = FALSE}
+library("Seurat")
+library("SingleR")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("data.table")
+library("magrittr")
 library(Matrix)
-library(Seurat)
-library(cowplot)
-library(uwot)
-library(parallel)
-library(EnhancedVolcano)
-library(tidyverse)
+library("cowplot")
+library("tidyverse")
+library("uwot")
+library("parallel")
+library(data.tree)
+library(DiagrammeR)
+library(rare)
 ```
+
+## Load Data
+
 ```{r}
-#' Title
-#'
-#' @param sco 
-#'
-#' @return
-#' @export
-#'
-#' @examples
-mydeg <- function(sco) {
-    exp.curr1 = sco@assays$RNA@counts
-    meta.dt1 = sco@meta.data %>%
-        as.data.table() %>%
-        .[,.(binaryResponse=ifelse(response %in% c("CR", "PR"),1 ,0) , patient=patient.name)] 
-    
-    meta.curr = list()
-    exp.curr2 = list()
-    for(patient in unique(meta.dt1$patient)){
-        inx = which(meta.dt1$patient==patient)
-        exp.curr2[[patient]] = rowSums(exp.curr1[,inx],na.rm=T)
-        meta.curr[[patient]] = meta.dt1[inx[1],]
-    }
-    meta.dt = do.call(rbind, meta.curr)
-    exp.curr = t(do.call(rbind, exp.curr2))
-    responders = meta.dt[binaryResponse==1]$patient
-    nonresponders = meta.dt[binaryResponse==0]$patient
-    deseq.out = DESeq2DETest(data.use=exp.curr[,c(responders,nonresponders)], cells.1=responders, cells.2=nonresponders)
-    deseq.dt = deseq.out %>%
-        as.data.frame() %>%
-        mutate(gene=rownames(.)) %>%
-        data.table() %>% 
-        .[order(pvalue)]
-    deseq.dt
-}
-
-
-load("~/liulab_home/data/single_cell/Lee_data/cd3_plus.hippo.clustering.RData") ## hippo.out
-# head(hippo.out$labelmatrix)
-for (xx in seq(2,ncol(hippo.out$labelmatrix))) {
-    lee.sco$clust.temp = as.factor(hippo.out$labelmatrix[,xx])
-    p= DimPlot(lee.sco, reduction = "umapunorm",  group.by = "clust.temp", pt.size = .1, label = TRUE) +  NoLegend()
-        ggsave(file=sprintf(".figs/lee/lee.hippo.clusters1.%s.pdf", xx), p, width=15, height=10)
-}
-
-
-
+sco <- readRDS("seurat.RDS")
 ```
 
-# create tree stucture
+```{r}
+set.seed(123)
+sco.sub = sco[,sample(ncol(sco),1000)]
+```
+
+```{r}
+sco.markers <- FindAllMarkers(sco.sub, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(sco.markers, file = "sco_markers_all.Rds")
+```
+
+```{r}
+sco.markers <- readRDS("sco_markers_all.Rds")
+```
+
+
+## Create Tree
+
 ```{r}
 create.tree <- function(object, reduction='pca', dims=NULL, oldk = 1, newk = 2) {
+    object
     
      embeddings <- Embeddings(object = object, reduction = reduction)[, dims]
      km = kmeans(embeddings, centers = 2, iter.max = 10)$cluster
      seurat.clust = object$seurat_clusters
-     out = sapply(levels(seurat.clust), function(tt){
+     out = sapply(unique(seurat.clust), function(tt){
          aa = table(km[seurat.clust==tt]) %>% which.max() %>%
          names() 
          ifelse(aa=="1", oldk, newk)
-     })
+     }) 
+     names(out) = unique(seurat.clust)
+     
      if(length(unique(out))==1) out[] = oldk
      out
 }
-create.cluster.tree<- function(sco) {
-    seurat.clusters = levels(sco$seurat_clusters)
+```
+
+### Generate Matrix
+
+```{r}
+create.cluster.tree <- function(sco) {
+    require(plyr)
+    old.clusters.id = unique(sco$seurat_clusters) %>% as.character
+    new.clusters.id = seq(length(old.clusters.id))
+    sco$seurat_clusters = mapvalues(sco$seurat_clusters, from = old.clusters.id, to = new.clusters.id)
+    seurat.clusters = new.clusters.id
     maxk = length(unique(sco$seurat_clusters))
     clust.mat = matrix(NA, ncol=maxk, nrow=maxk)
-    rownames(clust.mat) = paste0("clust", seurat.clusters) 
+    rownames(clust.mat) = paste0("clust", old.clusters.id) 
     clust.mat[,1] = 1
     for (ii in seq(1,maxk-1)) {
         clust.mat.old = clust.mat[, ii] 
         temp =  table(clust.mat.old) 
-        oldk = temp[temp > 1] %>% 
-            names() %>% as.numeric() %>% min()
+        temp = temp[temp > 1]
+        if(length(temp) == 0){ 
+            break
+        }
+        oldk = which.max(temp) %>% 
+        names() %>% as.numeric() %>% min()
         newk=max(clust.mat[,ii]) +1
-        if(oldk >= maxk) break()
-        seurat.clust.old = seurat.clusters[clust.mat.old == oldk]
+        if(oldk >= maxk){ 
+            break
+        }
+        seurat.clust.old = seurat.clusters[clust.mat.old == oldk] %>% as.character
         inx = which(seurat.clusters == oldk)
-        out = create.tree(sco[,sco$seurat_clusters %in% seurat.clust.old], reduction="harmony", oldk, newk, dims = 1:20)
+        out = create.tree(sco[,sco$seurat_clusters %in% seurat.clust.old], reduction="pca", oldk, newk, dims = 1:20)
         out = out[seurat.clust.old]
         clust.mat[, ii+1] = clust.mat[,ii]
-        clust.mat[paste0("clust", names(out)),ii+1] = unlist(out)
+        old.clusters.id.curr = old.clusters.id[as.numeric(names(out))]
+        clust.mat[paste0("clust", old.clusters.id.curr),ii+1] = unlist(out)
     }
     clust.mat%>% t() %>%
         unique() %>% t()
 }
 
-clust.mat.all = create.cluster.tree(lee.sco)
-library(data.tree)
-# acme <- Node$new("Acme Inc.")
-  # accounting <- acme$AddChild("Accounting")
-clust.mat.tree = list()
-clust.mat.tree[["1 1"]] = Node$new("root")
-# parent = 1
-for(ii in seq(2,ncol(clust.mat.all))){
-    for(parent in unique(clust.mat.all[,ii-1])){
-        parent.label = paste(ii-1, parent)
-        parent.inx = which(clust.mat.all[,ii-1]==parent)
-        childs = clust.mat.all[parent.inx,ii]
-        for(child in unique(childs))
-            clust.mat.tree[[paste(ii, child)]] = clust.mat.tree[[parent.label]]$AddChild(paste(ii, child))
-    }
-    
-}
-
 ```
 
-
-## calculate tree differential expression 
 ```{r}
-
-cc = 1
-lee.degs = list()
-clust.inx = gsub("clust", rownames(clust.mat.all), replacement = "")
-clust.mat.padded = cbind(clust.mat.all, as.factor(clust.inx))
-# for (ii in seq(ncol(clust))) {
-for (ii in c(1:6,17)) {
-    clust.curr = clust.mat.padded[,ii]
-    # for(jj in unique(clust.curr)) {
-    for(jj in 8:12) {
-        seurat.clust.curr = clust.inx[which(clust.curr==jj)]
-        lee.degs[[cc]] = 
-            tryCatch({
-            lee.sco[,(lee.sco$seurat_clusters %in%seurat.clust.curr) & (lee.sco$response %in% c("CR", "PD"))] %>%
-            mydeg()}, error = function(e) NA)
-        cc  = cc +1
-    }
-    print(cc)
-}
-# lee.degs.back = lee.degs
-
-lee.deg.mat = lapply(lee.degs, function(tt){ 
-    if(is.na(tt)) return(NULL)
-    tt[match(lee.degs[[1]]$gene, gene)]$stat
-    }) %>%
-    do.call(cbind, .) %>%
-    set_rownames(lee.degs[[1]]$gene)
-
-## only include lymphocyte populations. 
-aa =lee.sco@reductions$umap@cell.embeddings 
-lymp.deg = lee.sco[,(aa[,1] > -10 &  aa[,2] < 10) & (lee.sco$response %in% c("CR", "PD"))] %>% 
-    mydeg()
-
-
-sel.inx = which((aa[,1] > -10 &  aa[,2] < 10) & (lee.sco$response %in% c("CR", "PD")) & (lee.sco$Treatment.Cycle=="C1D1"))
-lee.curr.pre  = lee.sco[,sel.inx]
-lymp.deg.pre = lee.curr.pre %>% 
-    mydeg()
-
+clust.mat.all = create.cluster.tree(sco.sub)
+clust.mat.all
 ```
+
+```{r}
+ggsave("matrix.pdf")
+```
+
+
+### Tree Visualization
+
+```{r}
+df <- as.data.frame((clust.mat.all), row.names = c('clust1', 'clust0', 'clust4', 'clust2', 'clust9', 'clust7', 'clust8', 'clust3', 'clust5', 'clust6', 'clust11', 'clust14', 'clust10', 'clust15', 'clust13', 'clust12', 'clust16'))
+df
+```
+
+```{r}
+df2 <- as.data.frame((clust.mat.all), row.names = c('Naive CD4 T cells', 'Classical monocytes', 'Terminal effector CD8 T cells', 'Vd2 gd T cells', 'Th2 cells', 'Th17 cells', 'Natural killer cells', 'Intermediate monocytes', 'Myeloid dendritic cells', 'Naive B cells', 'Non classical monocytes', 'Switched memory B cells', 'Th1 cells', 'Naive CD8 T cells', 'Central memory CD8 T cells', 'Th1/Th17 cells', 'Effector memory CD8 T cells'))
+df2
+```
+
+```{r}
+d2 <- dist(df2, method = "euclidean")
+hc2 <- hclust(d2, method = "complete")
+plot(hc2, cex = 0.6, hang = -1)
+```
+
+
+```{r}
+d <- dist(df, method = "euclidean")
+hc1 <- hclust(d, method = "complete")
+plot(hc1, cex = 0.6, hang = -1)
+```
+
+```{r}
+hc3 <- agnes(df, method = "complete")
+hc3$ac
+```
+#' values close to 1 suggest strong clustering structure
+
+## Find Markers
+
+### Top 2
+
+```{r}
+sco.markers2 <- sco.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+sco.markers2
+```
+### Top 5
+
+```{r}
+sco.markers5 <- sco.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+sco.markers5
+```
+
+## Marker Visualization
+
+### Heatmap of Top 2 Markers per Cluster
+
+```{r}
+top2 <- sco.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+DoHeatmap(sco.sub, features = top2$gene) + NoLegend()
+```
+
+### Feature Plots for Markers of Interest
+
+Top 2 Markers for Clusters 1 and 3
+```{r}
+FeaturePlot(sco.sub, features = c("LYZ", "CXCL8", "S100A8", "THBS1"), reduction = "umap", label = TRUE, ncol = 2)
+```
+
+Top 2 Markers for Clusters 2 and 7
+```{r}
+FeaturePlot(sco.sub, features = c("NKG7", "GNLY", "CCL4L1", "CCL4L2"), reduction = "umap", label = TRUE, ncol = 2)
+```
+
+### Violin Plots for Markers of Interest
+
+Top 2 Markers for Cluster 1
+```{r}
+VlnPlot(sco.sub, features = c("LYZ", "CXCL8"))
+```
+
+Top 2 Markers for Cluster 3
+```{r}
+VlnPlot(sco.sub, features = c("S100A8", "THBS1"))
+```
+
+Top 2 Markers for Cluster 2
+```{r}
+VlnPlot(sco.sub, features = c("NKG7", "GNLY"))
+```
+
+Top 2 Markers for Cluster 7
+```{r}
+VlnPlot(sco.sub, features = c("CCL4L1", "CCL4L2"))
+```
+
+## Assign Cell Type Identity
+
+```{r}
+hpca.se <- MonacoImmuneData()
+pred.hesc.fine.all <- SingleR(test = sco.sub@assays$RNA@data, ref = hpca.se, labels = hpca.se$label.fine)
+pred.hesc.fine.all
+```
+
+```{r}
+sort(table(pred.hesc.fine.all$first.labels))
+```
+
+```{r}
+table(sco.sub@active.ident)
+```
+
+```{r}
+new.cluster.ids <- c("Classical monocytes", "Naive CD4 T cells", "Vd2 gd T cells", "Intermediate monocytes", "Terminal effector CD8 T cells", "Myeloid dendritic cells", "Naive B cells", "Th17 cells", "Natural killer cells", "Th2 cells", "Th1 cells", "Non classical monocytes", "Th1/Th17 cells", "Central memory CD8 T cells", "Switched memory B cells", "Naive CD8 T cells", "Effector memory CD8 T cells")
+names(new.cluster.ids) <- levels(sco.sub)
+sco.sub <- RenameIdents(sco.sub, new.cluster.ids)
+DimPlot(sco.sub, reduction = "umap", label = TRUE, pt.size = 1) + NoLegend()
+```
+
+```{r}
+DimPlot(sco.sub, reduction = "umap", label = TRUE)
+```
+
+```{r message = FALSE}
+cluster_cells <- matrix(c(0, "Classical monocytes", 1, "Naive CD4 T cells", 2, "Vd2 gd T cells", 3, "Intermediate monocytes", 4, "Terminal effector CD8 T cells", 5, "Myeloid dendritic cells", 6, "Naive B cells", 7, "Th17 cells", 8, "Natural killer cells", 9, "Th2 cells", 10, "Th1 cells", 11, "Non classical monocytes", 12, "Th1/Th17 cells", 13, "Central memory CD8 T cells", 14, "Switched memory B cells", 15, "Naive CD8 T cells", 16, "Effector memory CD8 T cells"), ncol=2, byrow=TRUE)
+colnames(cluster_cells) <- c("Cluster", "Cell Type")
+cluster_cells <- as.table(cluster_cells, row.names=FALSE)
+cluster_cells
+```
+
+
+
 
 
 
